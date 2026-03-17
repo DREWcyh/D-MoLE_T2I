@@ -4,10 +4,10 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROMPT_SET_DIR="${PROMPT_SET_DIR:-${PROJECT_ROOT}/data/test_prompts/item}"
 PRETRAINED_MODEL_PATH="${PRETRAINED_MODEL_PATH:-${PROJECT_ROOT}/models/PixArt-XL-2-512x512}"
-ADAPTER_ROOT="${ADAPTER_ROOT:-${PROJECT_ROOT}/outputs/train/dmole_v2_cross_modal_router/items_sequential}"
-INFER_OUTPUT_ROOT="${INFER_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/inference/dmole_v2_cross_modal_router/items_sequential}"
+ADAPTER_ROOT="${ADAPTER_ROOT:-${PROJECT_ROOT}/outputs/train/dmole_v3_residual_prototype_router/items_sequential}"
+INFER_OUTPUT_ROOT="${INFER_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/inference/dmole_v3_residual_prototype_router/items_sequential}"
 BASE_PROMPT="${BASE_PROMPT:-A photo of a item}"
-ROUTER_THRESHOLD="${ROUTER_THRESHOLD:-0.8}"
+ROUTER_THRESHOLD="${ROUTER_THRESHOLD:-0.3625}"
 CUDA_DEVICE="${CUDA_DEVICE:-0}"
 
 resolve_adapter_run_dir() {
@@ -48,7 +48,7 @@ for PROMPT_SPEC in "${PROMPT_SPECS[@]}"; do
 
   mkdir -p "${OUTPUT_DIR}"
 
-  CUDA_VISIBLE_DEVICES="${CUDA_DEVICE}" python "${PROJECT_ROOT}/infer_dmole_v2.py" \
+  CUDA_VISIBLE_DEVICES="${CUDA_DEVICE}" python "${PROJECT_ROOT}/infer_dmole_v3.py" \
     --pretrained_model_name_or_path="${PRETRAINED_MODEL_PATH}" \
     --adapter_dir="${ADAPTER_RUN_DIR}" \
     --prompts_file="${PROMPT_FILE}" \

@@ -1,3 +1,5 @@
+"""Training entry point for the original D-MoLE v1 pipeline."""
+
 import argparse
 import logging
 import math
@@ -27,7 +29,6 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# 导入解耦出的模块
 from dataset import DreamBoothDataset, collate_fn, tokenize_prompt, encode_prompt
 from feature_extractor import extract_and_fuse_features
 from router import DMoLE_Router
@@ -37,6 +38,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def parse_args():
+    """Parse CLI arguments for v1 training."""
     parser = argparse.ArgumentParser(description="Fine-tuning script for PixArt-Alpha with DreamBooth support.")
 
     parser.add_argument("--deepspeed", type=str, default=None, help="DeepSpeed configuration file path")
@@ -124,6 +126,7 @@ def parse_args():
     return args
     
 def set_seed(seed):
+    """Set random seeds for reproducible training."""
     if seed is None:
         return
     random.seed(seed)
@@ -134,12 +137,14 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 def restore_lora_to_fp32(model):
+    """Cast all LoRA parameters back to float32."""
     for n, p in model.named_parameters():
         if "lora" in n:
             if p.dtype != torch.float32:
                 p.data = p.data.to(torch.float32)
 
 def get_batch_prompt_embeds(batch, text_encoder, args, device, weight_dtype):
+    """Fetch prompt embeddings from cache or encode them on the fly."""
     if "prompt_embeds" in batch:
         return batch["prompt_embeds"].to(device=device, dtype=weight_dtype)
 
@@ -153,6 +158,7 @@ def get_batch_prompt_embeds(batch, text_encoder, args, device, weight_dtype):
     return prompt_embeds.to(device=device, dtype=weight_dtype)
 
 def load_base_and_all_loras(args, weight_dtype):
+    """Load the base transformer together with any previously saved adapters."""
     model = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer", torch_dtype=weight_dtype)
 
     model.requires_grad_(False)
@@ -379,9 +385,8 @@ def main():
     # Initialize DeepSpeed before anything else
     ds.init_distributed()
 
-    # Create timestamp for unique output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    timestamped_output_dir = os.path.join(args.output_dir, f"run")
+    timestamped_output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
     os.makedirs(timestamped_output_dir, exist_ok=True)
 
 
@@ -405,7 +410,7 @@ def main():
         logger.info("==========================================================")
 
         # Save hyperparameters as JSON for easy reference
-        with open(os.path.join(timestamped_output_dir, "hyperparameters.json"), "w") as f:
+        with open(os.path.join(timestamped_output_dir, "train_config.json"), "w") as f:
             import json
             json.dump(hyperparams, f, indent=4, sort_keys=True)
 
@@ -415,7 +420,7 @@ def main():
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
         import wandb
         if ds.comm.get_rank() == 0:  # Only initialize wandb on the main process
-            wandb.init(project="pixart-dreambooth-continual", name=f"run_{timestamp}")
+            wandb.init(project="pixart-dreambooth-continual", name=f"train_v1_{timestamp}")
             # Log hyperparameters to wandb
             wandb.config.update(vars(args))
 
@@ -685,11 +690,11 @@ def main():
         )
 
         if ds.comm.get_rank() == 0:
-            save_path = os.path.join(timestamped_output_dir, f"task_{dataset_idx}")
+            save_path = os.path.join(timestamped_output_dir, f"task_{dataset_idx + 1:02d}")
             os.makedirs(save_path, exist_ok=True)
             model_to_save = model_engine.module if hasattr(model_engine, "module") else model_engine
             model_to_save.save_pretrained(os.path.join(save_path, "transformer"))
-            torch.save(router.state_dict(), os.path.join(save_path, "router.bin"))
+            torch.save(router.state_dict(), os.path.join(save_path, "router_state.bin"))
 
         del temp_dataloader, temp_dataset, model_engine, optimizer, lr_scheduler
         torch.cuda.empty_cache()

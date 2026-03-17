@@ -1,3 +1,5 @@
+"""Feature extraction utilities for the v2 cross-modal router."""
+
 import torch
 import torch.nn.functional as F
 

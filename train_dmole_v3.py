@@ -1,3 +1,5 @@
+"""Training entry point for the v3 residual-prototype D-MoLE pipeline."""
+
 import argparse
 import logging
 import math
@@ -27,16 +29,16 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 if current_dir not in sys.path:
     sys.path.insert(0, current_dir)
 
-# 导入解耦出的模块
 from dataset import DreamBoothDataset, collate_fn, tokenize_prompt, encode_prompt
-from feature_extractor_v2 import extract_cross_modal_features
-from router_v2 import CrossModalRouter
+from feature_extractor_v3 import extract_text_features
+from router_v3 import ResidualPrototypeRouter
 from zcp_allocator import compute_zcp_scores, add_dmole_lora_adapter
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 def parse_args():
+    """Parse CLI arguments for v3 training."""
     parser = argparse.ArgumentParser(description="Fine-tuning script for PixArt-Alpha with DreamBooth support.")
 
     parser.add_argument("--deepspeed", type=str, default=None, help="DeepSpeed configuration file path")
@@ -93,8 +95,8 @@ def parse_args():
     parser.add_argument("--use_dmo_le", action="store_true", help="Enable Dynamic Mixture of LoRA Experts.")
     parser.add_argument("--param_budget", type=int, default=8, help="Number of Transformer blocks to allocate new LoRA experts per task.")
     parser.add_argument("--zcp_sample_ratio", type=float, default=0.01, help="Ratio of data to use for Zero-Cost Proxy evaluation.")
-    parser.add_argument("--router_threshold", type=float, default=0.2, help="Cosine-distance threshold for CrossModalRouter fallback.")
-    parser.add_argument("--base_prompt", type=str, default="A photo of a item", help="Base prompt used to build residual text features for CrossModalRouter.")
+    parser.add_argument("--router_threshold", type=float, default=0.15, help="Cosine-distance threshold for ResidualPrototypeRouter fallback.")
+    parser.add_argument("--base_prompt", type=str, default="A photo of a item", help="Base prompt used by ResidualPrototypeRouter for residual stripping.")
     parser.add_argument("--use_inter_modal_curriculum", action="store_true", help="Enable dynamic gradient scaling between spatial and text modules.")
     parser.add_argument("--zcp_rho", type=float, default=0.8, help="Cumulative saliency ratio for dynamic layer allocation (default: 0.8)")
 
@@ -125,6 +127,7 @@ def parse_args():
     return args
     
 def set_seed(seed):
+    """Set random seeds for reproducible training."""
     if seed is None:
         return
     random.seed(seed)
@@ -135,12 +138,14 @@ def set_seed(seed):
     torch.backends.cudnn.deterministic = True
 
 def restore_lora_to_fp32(model):
+    """Cast all LoRA parameters back to float32."""
     for n, p in model.named_parameters():
         if "lora" in n:
             if p.dtype != torch.float32:
                 p.data = p.data.to(torch.float32)
 
 def get_batch_prompt_embeds(batch, text_encoder, args, device, weight_dtype):
+    """Fetch prompt embeddings from cache or encode them on the fly."""
     if "prompt_embeds" in batch:
         return batch["prompt_embeds"].to(device=device, dtype=weight_dtype)
 
@@ -154,6 +159,7 @@ def get_batch_prompt_embeds(batch, text_encoder, args, device, weight_dtype):
     return prompt_embeds.to(device=device, dtype=weight_dtype)
 
 def load_base_and_all_loras(args, weight_dtype):
+    """Load the base transformer together with any previously saved adapters."""
     model = Transformer2DModel.from_pretrained(args.pretrained_model_name_or_path, subfolder="transformer", torch_dtype=weight_dtype)
 
     model.requires_grad_(False)
@@ -380,9 +386,8 @@ def main():
     # Initialize DeepSpeed before anything else
     ds.init_distributed()
 
-    # Create timestamp for unique output directory
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    timestamped_output_dir = os.path.join(args.output_dir, f"run")
+    timestamped_output_dir = os.path.join(args.output_dir, f"run_{timestamp}")
     os.makedirs(timestamped_output_dir, exist_ok=True)
 
 
@@ -406,7 +411,7 @@ def main():
         logger.info("==========================================================")
 
         # Save hyperparameters as JSON for easy reference
-        with open(os.path.join(timestamped_output_dir, "hyperparameters.json"), "w") as f:
+        with open(os.path.join(timestamped_output_dir, "train_config.json"), "w") as f:
             import json
             json.dump(hyperparams, f, indent=4, sort_keys=True)
 
@@ -416,7 +421,7 @@ def main():
             raise ImportError("Make sure to install wandb if you want to use it for logging during training.")
         import wandb
         if ds.comm.get_rank() == 0:  # Only initialize wandb on the main process
-            wandb.init(project="pixart-dreambooth-continual", name=f"run_{timestamp}")
+            wandb.init(project="pixart-dreambooth-continual", name=f"train_v3_{timestamp}")
             # Log hyperparameters to wandb
             wandb.config.update(vars(args))
 
@@ -479,8 +484,9 @@ def main():
 
     base_prompt_embeds, _ = compute_text_embeddings(args.base_prompt)
     base_prompt_embeds = base_prompt_embeds.to(device=device, dtype=weight_dtype)
+    base_text_feature = extract_text_features(base_prompt_embeds).to(device=device, dtype=torch.float32)
     if ds.comm.get_rank() == 0:
-        logger.info("Using residual text features with base prompt: %s", args.base_prompt)
+        logger.info("Using residual prototype routing with base prompt: %s", args.base_prompt)
 
     # Pre-compute text embeddings if enabled
     if args.pre_compute_text_embeddings:
@@ -590,48 +596,31 @@ def main():
             lora_adapters, transformer = add_new_lora_adapter(transformer, lora_adapters, args)
 
         current_adapter = lora_adapters[-1]
-        all_text_feats = []
-        all_vision_feats = []
-        for batch in temp_dataloader:
-            with torch.no_grad():
-                prompt_embeds = get_batch_prompt_embeds(batch, text_encoder, args, device, weight_dtype)
-                p_values = batch["pixel_values"].to(device, dtype=weight_dtype)
-                if args.with_prior_preservation:
-                        prompt_embeds = prompt_embeds.chunk(2, dim=0)[0]
-                        p_values = p_values.chunk(2, dim=0)[0]
-                        
-                latents = vae.encode(p_values).latent_dist.sample()
-
-                # Extract paired text/vision features for the cross-modal router.
-                t_feat_batch, v_feat_batch = extract_cross_modal_features(
-                    prompt_embeds,
-                    latents,
-                    base_t_input=base_prompt_embeds,
-                )
-                all_text_feats.append(t_feat_batch.cpu())
-                all_vision_feats.append(v_feat_batch.cpu())
-                
-        task_text_feature_matrix = torch.cat(all_text_feats, dim=0).to(device=device, dtype=torch.float32)
-        task_vision_feature_matrix = torch.cat(all_vision_feats, dim=0).to(device=device, dtype=torch.float32)
-        task_text_centroid = task_text_feature_matrix.mean(dim=0, keepdim=True)
+        task_prompt_hidden_states = pre_comp_embeds
+        if task_prompt_hidden_states is None:
+            task_prompt_hidden_states, _ = compute_text_embeddings(instance_prompt)
+        task_prompt_hidden_states = task_prompt_hidden_states.to(device=device, dtype=weight_dtype)
+        task_text_feature = extract_text_features(task_prompt_hidden_states).to(
+            device=device,
+            dtype=torch.float32,
+        )
             
         if args.use_dmo_le:
             if router is None:
-                router = CrossModalRouter(
-                    text_dim=task_text_feature_matrix.shape[-1],
-                    vision_dim=task_vision_feature_matrix.shape[-1],
+                router = ResidualPrototypeRouter(
+                    feature_dim=task_text_feature.shape[-1],
                 ).to(device)
+                router.set_base_feature(base_text_feature)
                 if ds.comm.get_rank() == 0:
                     logger.info(
-                        "Initialized CrossModalRouter with text_dim=%s, vision_dim=%s",
-                        task_text_feature_matrix.shape[-1],
-                        task_vision_feature_matrix.shape[-1],
+                        "Initialized ResidualPrototypeRouter with feature_dim=%s",
+                        task_text_feature.shape[-1],
                     )
             
             if dataset_idx > 0:
-                # Route the current task via text centroid only.
+                # Route the current task via its prompt feature only.
                 best_old = router.get_top_k_experts(
-                    task_text_centroid,
+                    task_text_feature,
                     threshold=args.router_threshold,
                 )
                 if best_old and best_old != "fallback":
@@ -647,13 +636,8 @@ def main():
                     if ds.comm.get_rank() == 0:
                         logger.info(f"Knowledge transfer complete. {current_adapter} starts from {best_old}.")
             
-            # Register the new task and train the text->vision mapper.
-            router.add_task(current_adapter)
-            router.train_mapper(
-                current_adapter,
-                task_text_feature_matrix,
-                task_vision_feature_matrix,
-            )
+            # Register the new task prototype directly from its prompt feature.
+            router.add_task(current_adapter, task_text_feature)
 
         transformer.set_adapter(current_adapter) 
         if ds.comm.get_rank() == 0:
@@ -688,12 +672,12 @@ def main():
         )
 
         if ds.comm.get_rank() == 0:
-            save_path = os.path.join(timestamped_output_dir, f"task_{dataset_idx}")
+            save_path = os.path.join(timestamped_output_dir, f"task_{dataset_idx + 1:02d}")
             os.makedirs(save_path, exist_ok=True)
             model_to_save = model_engine.module if hasattr(model_engine, "module") else model_engine
             model_to_save.save_pretrained(os.path.join(save_path, "transformer"))
             if router is not None:
-                torch.save(router.state_dict(), os.path.join(save_path, "router.bin"))
+                torch.save(router.state_dict(), os.path.join(save_path, "router_state.bin"))
 
         del temp_dataloader, temp_dataset, model_engine, optimizer, lr_scheduler
         torch.cuda.empty_cache()

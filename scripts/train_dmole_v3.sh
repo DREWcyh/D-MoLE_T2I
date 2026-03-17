@@ -4,9 +4,9 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/item}"
 PRETRAINED_MODEL_PATH="${PRETRAINED_MODEL_PATH:-${PROJECT_ROOT}/models/PixArt-XL-2-512x512}"
-TRAIN_OUTPUT_ROOT="${TRAIN_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/train/dmole_v2_cross_modal_router/items_sequential}"
+TRAIN_OUTPUT_ROOT="${TRAIN_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/train/dmole_v3_residual_prototype_router/items_sequential}"
 BASE_PROMPT="${BASE_PROMPT:-A photo of a item}"
-GPU_IDS="${GPU_IDS:-4,5}"
+GPU_IDS="${GPU_IDS:-0,1}"
 MASTER_PORT="${MASTER_PORT:-$(shuf -i 20000-65000 -n 1)}"
 
 INSTANCE_DIRS="${INSTANCE_DIRS:-${DATA_ROOT}/dog,${DATA_ROOT}/dog3,${DATA_ROOT}/cat2,${DATA_ROOT}/shiny_sneaker}"
@@ -17,7 +17,7 @@ CLASS_PROMPTS="${CLASS_PROMPTS:-A photo of a dog.,A photo of a dog.,A photo of a
 mkdir -p "${TRAIN_OUTPUT_ROOT}"
 
 deepspeed --include "localhost:${GPU_IDS}" --master_port="${MASTER_PORT}" \
-  "${PROJECT_ROOT}/train_dmole_v2.py" \
+  "${PROJECT_ROOT}/train_dmole_v3.py" \
   --deepspeed "${PROJECT_ROOT}/ds_config/item.json" \
   --pretrained_model_name_or_path="${PRETRAINED_MODEL_PATH}" \
   --output_dir="${TRAIN_OUTPUT_ROOT}" \
@@ -42,5 +42,5 @@ deepspeed --include "localhost:${GPU_IDS}" --master_port="${MASTER_PORT}" \
   --use_dmo_le \
   --param_budget=28 \
   --zcp_sample_ratio=0.01 \
-  --router_threshold=0.2 \
+  --router_threshold=0.15 \
   --use_inter_modal_curriculum

@@ -29,14 +29,14 @@
 
 | 文件 | 作用 | 关键接口 |
 | --- | --- | --- |
-| `main.py` | 训练主入口，串起持续学习流程 | `main()`、`train_on_dataset()` |
+| `train_dmole_v1.py` | 训练主入口，串起持续学习流程 | `main()`、`train_on_dataset()` |
 | `dataset.py` | DreamBooth 数据集、prompt 编码、batch 拼接 | `DreamBoothDataset`、`collate_fn` |
 | `feature_extractor.py` | 文本/图像特征抽取与融合 | `extract_and_fuse_features()` |
 | `router.py` | 基于 AE 的任务路由器 | `DMoLE_Router` |
 | `zcp_allocator.py` | ZCP 打分与动态 LoRA expert 挂载 | `compute_zcp_scores()`、`add_dmole_lora_adapter()` |
-| `inference_dmole.py` | 推理入口，负责加载 experts 与 router 并生成图片 | `main()` |
-| `scripts/train_dmole.sh` | 训练脚本，配置默认数据、模型和超参数 | shell launcher |
-| `scripts/infer_dmole.sh` | 推理脚本，配置 prompt 文件和输出目录 | shell launcher |
+| `infer_dmole_v1.py` | 推理入口，负责加载 experts 与 router 并生成图片 | `main()` |
+| `scripts/train_dmole_v1.sh` | 训练脚本，配置默认数据、模型和超参数 | shell launcher |
+| `scripts/infer_dmole_v1.sh` | 推理脚本，配置 prompt 文件和输出目录 | shell launcher |
 | `ds_config/item.json` | DeepSpeed 配置 | ZeRO Stage 1、fp16、micro-batch |
 
 ## 3. 记号与变量
@@ -95,7 +95,7 @@ W' = W + \Delta W,\qquad \Delta W = BA
 
 对应代码见：
 
-- `main.py` 中的 `add_new_lora_adapter()`
+- `train_dmole_v1.py` 中的 `add_new_lora_adapter()`
 - `zcp_allocator.py` 中的 `add_dmole_lora_adapter()`
 
 ## 5. 数据与输入表示
@@ -152,7 +152,7 @@ H = E_{\text{text}}(p) \in \mathbb{R}^{B \times L \times 4096}
 \mathcal{L}_{\text{prior}} = \text{MSE}(\hat{y}_{\text{prior}}, y_{\text{prior}})
 \]
 
-但是需要注意：当前默认训练脚本 `scripts/train_dmole.sh` 传入了 `CLASS_DIRS` 和 `CLASS_PROMPTS`，却没有传 `--with_prior_preservation`，因此默认配置下 prior preservation 实际并没有被启用。
+但是需要注意：当前默认训练脚本 `scripts/train_dmole_v1.sh` 传入了 `CLASS_DIRS` 和 `CLASS_PROMPTS`，却没有传 `--with_prior_preservation`，因此默认配置下 prior preservation 实际并没有被启用。
 
 ## 6. 扩散训练目标
 
@@ -501,14 +501,14 @@ g_b = \sum_{p \in \Theta_b} \left\|\frac{\partial \mathcal{L}_{\text{zcp}}}{\par
 
 也就是说：
 
-- `task_0` 对应 `stage1`
-- `task_1` 对应 `stage2`
+- `task_01` 对应 `stage1`
+- `task_02` 对应 `stage2`
 - `task_2` 对应 `stage3`
 - 以此类推
 
 ## 11. 持续学习流程
 
-文件：`main.py`
+文件：`train_dmole_v1.py`
 
 ### 11.1 总流程
 
@@ -523,7 +523,7 @@ g_b = \sum_{p \in \Theta_b} \left\|\frac{\partial \mathcal{L}_{\text{zcp}}}{\par
 7. 从当前任务数据抽取 feature matrix
 8. 用 router 判断最相似历史任务并可选地进行 mentor 初始化
 9. 训练当前 expert
-10. 保存 `task_t/transformer` 和 `router.bin`
+10. 保存 `task_t/transformer` 和路由器状态文件
 
 ### 11.2 任务特征矩阵
 
@@ -582,7 +582,7 @@ DeepSpeed：
 
 ## 12. 推理流程
 
-文件：`inference_dmole.py`
+文件：`infer_dmole_v1.py`
 
 ### 12.1 推理阶段加载内容
 
@@ -590,7 +590,7 @@ DeepSpeed：
 
 1. 基础 PixArt 模型
 2. `adapter_dir` 下所有 `task_*` expert
-3. 最后一个任务目录下的 `router.bin`
+3. 最后一个任务目录下的路由器状态文件
 
 其中 `find_adapter_config()` 允许兼容三种目录结构：
 
@@ -635,7 +635,7 @@ k^* = \arg\min_k e_k(z_{\text{infer}})
 
 ## 13. 训练与推理脚本默认配置
 
-### 13.1 `scripts/train_dmole.sh`
+### 13.1 `scripts/train_dmole_v1.sh`
 
 默认训练 4 个任务：
 
@@ -656,7 +656,7 @@ k^* = \arg\min_k e_k(z_{\text{infer}})
 - `router_threshold=1e-6`
 - `zcp_sample_ratio=0.01`
 
-### 13.2 `scripts/infer_dmole.sh`
+### 13.2 `scripts/infer_dmole_v1.sh`
 
 默认读取 4 个 prompt 文件，并把输出保存到 `outputs/inference/...` 下。
 
@@ -695,20 +695,20 @@ z = f_t
 
 ### 15.3 `use_inter_modal_curriculum` 当前未生效
 
-训练脚本传了 `--use_inter_modal_curriculum`，但在 `main.py` 中没有看到对应的训练逻辑。
+训练脚本传了 `--use_inter_modal_curriculum`，但在 `train_dmole_v1.py` 中没有看到对应的训练逻辑。
 
 ### 15.4 默认训练脚本并未真正启用 prior preservation
 
 原因是没有传 `--with_prior_preservation`。
 
-### 15.5 训练/推理默认输出目录有一处不一致
+### 15.5 训练/推理默认输出目录说明
 
 当前默认脚本中：
 
-- 训练输出默认到 `outputs/train/dmole_without_prior/items_sequential`
-- 推理脚本默认从 `outputs/train/dmole_without_prior_3/items_sequential/run` 读取 adapter
+- 训练输出默认到 `outputs/train/dmole_v1_autoencoder_router/items_sequential/run_时间戳`
+- 推理脚本会优先自动选择最新的 `run_*` 目录，也兼容旧的 `run` 目录
 
-如果直接用默认脚本训练后立刻推理，需要手动把 `ADAPTER_DIR` 调整到实际训练输出目录。
+如果需要显式指定某一轮结果，仍然可以手动传 `ADAPTER_DIR` 指向目标训练 run 目录。
 
 ### 15.6 推理脚本中的 `num_validation_images` 参数当前未真正生效
 

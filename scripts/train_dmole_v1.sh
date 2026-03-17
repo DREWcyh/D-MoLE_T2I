@@ -3,8 +3,8 @@ set -euo pipefail
 
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DATA_ROOT="${DATA_ROOT:-${PROJECT_ROOT}/item}"
-MODEL_NAME="${MODEL_NAME:-${PROJECT_ROOT}/models/PixArt-XL-2-512x512}"
-OUTPUT_DIR="${OUTPUT_DIR:-${PROJECT_ROOT}/outputs/train/dmole_without_prior/items_sequential}"
+PRETRAINED_MODEL_PATH="${PRETRAINED_MODEL_PATH:-${PROJECT_ROOT}/models/PixArt-XL-2-512x512}"
+TRAIN_OUTPUT_ROOT="${TRAIN_OUTPUT_ROOT:-${PROJECT_ROOT}/outputs/train/dmole_v1_autoencoder_router/items_sequential}"
 GPU_IDS="${GPU_IDS:-0,1}"
 MASTER_PORT="${MASTER_PORT:-$(shuf -i 20000-65000 -n 1)}"
 
@@ -13,13 +13,13 @@ INSTANCE_PROMPTS="${INSTANCE_PROMPTS:-A photo of p0h1 dog.,A photo of k5f2 dog.,
 CLASS_DIRS="${CLASS_DIRS:-${DATA_ROOT}/dog_prior_images,${DATA_ROOT}/dog_prior_images,${DATA_ROOT}/cat_prior_images,${DATA_ROOT}/sneaker_prior_images}"
 CLASS_PROMPTS="${CLASS_PROMPTS:-A photo of a dog.,A photo of a dog.,A photo of a cat.,A photo of a sneaker.}"
 
-mkdir -p "${OUTPUT_DIR}"
+mkdir -p "${TRAIN_OUTPUT_ROOT}"
 
 deepspeed --include "localhost:${GPU_IDS}" --master_port="${MASTER_PORT}" \
-  "${PROJECT_ROOT}/main.py" \
+  "${PROJECT_ROOT}/train_dmole_v1.py" \
   --deepspeed "${PROJECT_ROOT}/ds_config/item.json" \
-  --pretrained_model_name_or_path="${MODEL_NAME}" \
-  --output_dir="${OUTPUT_DIR}" \
+  --pretrained_model_name_or_path="${PRETRAINED_MODEL_PATH}" \
+  --output_dir="${TRAIN_OUTPUT_ROOT}" \
   --instance_data_dirs="${INSTANCE_DIRS}" \
   --instance_prompts="${INSTANCE_PROMPTS}" \
   --class_data_dirs="${CLASS_DIRS}" \
@@ -34,7 +34,7 @@ deepspeed --include "localhost:${GPU_IDS}" --master_port="${MASTER_PORT}" \
   --lr_warmup_steps=0 \
   --max_train_steps=500 \
   --pre_compute_text_embeddings \
-  --seed="0" \
+  --seed=0 \
   --mixed_precision="fp16" \
   --lora_rank=16 \
   --use_dmo_le \

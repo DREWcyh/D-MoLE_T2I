@@ -1,3 +1,5 @@
+"""Router implementation for the v2 cross-modal projection pipeline."""
+
 import logging
 
 import torch

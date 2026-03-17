@@ -1,26 +1,36 @@
-import torch
+"""Dataset and prompt utilities for D-MoLE_T2I training."""
+
 from pathlib import Path
+
+import torch
 from PIL import Image
 from PIL.ImageOps import exif_transpose
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+
 def tokenize_prompt(tokenizer, prompt, tokenizer_max_length=120):
-    if tokenizer_max_length is not None:
-        max_length = tokenizer_max_length
-    else:
+    """Tokenize a single prompt into padded T5 inputs."""
+    max_length = tokenizer_max_length
+    if max_length is None:
         max_length = tokenizer.model_max_length
 
-    text_inputs = tokenizer(
+    return tokenizer(
         prompt,
         truncation=True,
         padding="max_length",
         max_length=max_length,
         return_tensors="pt",
     )
-    return text_inputs
 
-def encode_prompt(text_encoder, input_ids, attention_mask, text_encoder_use_attention_mask=None):
+
+def encode_prompt(
+    text_encoder,
+    input_ids,
+    attention_mask,
+    text_encoder_use_attention_mask=None,
+):
+    """Encode token IDs into prompt embeddings."""
     text_input_ids = input_ids.to(text_encoder.device)
 
     if text_encoder_use_attention_mask:
@@ -33,10 +43,12 @@ def encode_prompt(text_encoder, input_ids, attention_mask, text_encoder_use_atte
         attention_mask=attention_mask,
         return_dict=False,
     )
-    prompt_embeds = prompt_embeds[0]
-    return prompt_embeds
+    return prompt_embeds[0]
+
 
 class DreamBoothDataset(Dataset):
+    """DreamBooth-style dataset used by the sequential D-MoLE trainers."""
+
     def __init__(
         self,
         instance_data_root,
@@ -60,9 +72,9 @@ class DreamBoothDataset(Dataset):
 
         self.instance_data_root = Path(instance_data_root)
         if not self.instance_data_root.exists():
-            raise ValueError(f"Instance {self.instance_data_root} images root doesn't exists.")
+            raise ValueError(f"Instance image root {self.instance_data_root} does not exist.")
 
-        self.instance_images_path = list(Path(instance_data_root).iterdir())
+        self.instance_images_path = list(self.instance_data_root.iterdir())
         self.num_instance_images = len(self.instance_images_path)
         self.instance_prompt = instance_prompt
         self._length = self.num_instance_images
@@ -93,56 +105,52 @@ class DreamBoothDataset(Dataset):
         return self._length
 
     def __getitem__(self, index):
+        """Load one instance example and its optional prior-preservation pair."""
         example = {}
+
         instance_image = Image.open(self.instance_images_path[index % self.num_instance_images])
         instance_image = exif_transpose(instance_image)
-
-        if not instance_image.mode == "RGB":
+        if instance_image.mode != "RGB":
             instance_image = instance_image.convert("RGB")
         example["instance_images"] = self.image_transforms(instance_image)
 
         if self.encoder_hidden_states is not None:
             example["instance_prompt_embeds"] = self.encoder_hidden_states
-            text_inputs = tokenize_prompt(
-                self.tokenizer, self.instance_prompt, tokenizer_max_length=self.tokenizer_max_length
-            )
-            example["instance_prompt_ids"] = text_inputs.input_ids
-            example["instance_attention_mask"] = text_inputs.attention_mask
-        else:
-            text_inputs = tokenize_prompt(
-                self.tokenizer, self.instance_prompt, tokenizer_max_length=self.tokenizer_max_length
-            )
-            example["instance_prompt_ids"] = text_inputs.input_ids
-            example["instance_attention_mask"] = text_inputs.attention_mask
 
-        if self.class_data_root:
+        text_inputs = tokenize_prompt(
+            self.tokenizer,
+            self.instance_prompt,
+            tokenizer_max_length=self.tokenizer_max_length,
+        )
+        example["instance_prompt_ids"] = text_inputs.input_ids
+        example["instance_attention_mask"] = text_inputs.attention_mask
+
+        if self.class_data_root is not None:
             class_image = Image.open(self.class_images_path[index % self.num_class_images])
             class_image = exif_transpose(class_image)
-
-            if not class_image.mode == "RGB":
+            if class_image.mode != "RGB":
                 class_image = class_image.convert("RGB")
             example["class_images"] = self.image_transforms(class_image)
 
             if self.class_prompt_encoder_hidden_states is not None:
                 example["class_prompt_embeds"] = self.class_prompt_encoder_hidden_states
-                class_text_inputs = tokenize_prompt(
-                    self.tokenizer, self.class_prompt, tokenizer_max_length=self.tokenizer_max_length
-                )
-                example["class_prompt_ids"] = class_text_inputs.input_ids
-                example["class_attention_mask"] = class_text_inputs.attention_mask
-            else:
-                class_text_inputs = tokenize_prompt(
-                    self.tokenizer, self.class_prompt, tokenizer_max_length=self.tokenizer_max_length
-                )
-                example["class_prompt_ids"] = class_text_inputs.input_ids
-                example["class_attention_mask"] = class_text_inputs.attention_mask
+
+            class_text_inputs = tokenize_prompt(
+                self.tokenizer,
+                self.class_prompt,
+                tokenizer_max_length=self.tokenizer_max_length,
+            )
+            example["class_prompt_ids"] = class_text_inputs.input_ids
+            example["class_attention_mask"] = class_text_inputs.attention_mask
 
         return example
 
+
 def collate_fn(examples, with_prior_preservation=False):
+    """Collate DreamBooth examples into a training batch."""
     has_attention_mask = "instance_attention_mask" in examples[0]
     has_prompt_embeds = "instance_prompt_embeds" in examples[0]
-    
+
     input_ids = [example["instance_prompt_ids"].cpu() for example in examples]
     pixel_values = [example["instance_images"] for example in examples]
 
@@ -161,24 +169,29 @@ def collate_fn(examples, with_prior_preservation=False):
             prompt_embeds += [example["class_prompt_embeds"].cpu() for example in examples]
 
     pixel_values = torch.stack(pixel_values).to(memory_format=torch.contiguous_format).float()
+
     processed_input_ids = []
     for tensor in input_ids:
-        if tensor.ndim == 1: 
+        if tensor.ndim == 1:
             processed_input_ids.append(tensor.unsqueeze(0))
-        elif tensor.ndim == 2 and tensor.shape[0] != 1: 
+        elif tensor.ndim == 2 and tensor.shape[0] != 1:
             processed_input_ids.append(tensor.unsqueeze(0))
         else:
             processed_input_ids.append(tensor)
     input_ids = torch.cat(processed_input_ids, dim=0)
-    batch = {"input_ids": input_ids, "pixel_values": pixel_values}
+
+    batch = {
+        "input_ids": input_ids,
+        "pixel_values": pixel_values,
+    }
 
     if has_attention_mask:
         processed_masks = []
-        for m in attention_mask:
-            if m.ndim == 1:
-                processed_masks.append(m.unsqueeze(0))
+        for mask in attention_mask:
+            if mask.ndim == 1:
+                processed_masks.append(mask.unsqueeze(0))
             else:
-                processed_masks.append(m)
+                processed_masks.append(mask)
         batch["attention_mask"] = torch.cat(processed_masks, dim=0)
 
     if has_prompt_embeds:
